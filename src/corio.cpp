@@ -1,13 +1,5 @@
 #include <corio/corio.hpp>
-
-
-struct stupid_sender {
-    template <typename R>
-    requires cor3ntin::corio::execution::receiver_of<R, int>
-    void submit(R&& r) const noexcept {
-        cor3ntin::corio::execution::set_value(r, 42);
-    }
-};
+#include <iostream>
 
 struct stupid_receiver {
 public:
@@ -21,39 +13,25 @@ public:
     void set_done() noexcept {}
 };
 
-struct stupid_executor {
-    template <typename Fn>
-    requires cor3ntin::corio::concepts::invocable<Fn>
-    auto execute(Fn&& f) const {
-        return f();
-    }
-};
-
-
+/*
 bool operator==(const stupid_executor&, const stupid_executor&) {
-        return true;
+    return true;
 };
 bool operator!=(const stupid_executor&, const stupid_executor&) {
-        return false;
+    return false;
 };
-
-
-namespace {
-
-using namespace cor3ntin::corio;
-static_assert(execution::sender<stupid_sender>);
-static_assert(execution::__submit_ns::submittable_receiver<stupid_sender, execution::sink_receiver>);
-static_assert(execution::__execute_ns::executable_function<stupid_executor, execution::details::as_invocable<execution::sink_receiver>>);
-static_assert(execution::sender<stupid_sender>);
-static_assert(execution::receiver<stupid_receiver>);
-static_assert(execution::executor<stupid_executor>);
-}
+**/
 
 int main() {
     using namespace cor3ntin::corio::execution;
-    stupid_executor ex;
-    execute(ex, [] {
-        puts("Hello World\n");
-        return;
-    });
+
+    std::mutex m;
+
+    static_thread_pool p(20);
+    for(auto i = 0; i < 1000000; i++) {
+        auto sender = p.scheduler().schedule();
+        std::move(sender).spawn(as_receiver{[&m] { printf("%ul\n", std::this_thread::get_id()); }});
+    }
+
+    wait(p.depleted());
 }
