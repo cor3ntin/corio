@@ -1,136 +1,112 @@
 #pragma once
 #include <corio/concepts.hpp>
+#include <cppcoro/task.hpp>
 #include <experimental/coroutine>
+#include <variant>
+#include <iostream>
+
+namespace cor3ntin::corio {
+
+struct operation_cancelled : std::exception {
+    virtual const char* what() const noexcept {
+        return "operation cancelled";
+    }
+};
 
 template <typename Sender>
 struct sender_awaiter {
 private:
-  using value_type  = int; //sender_values_t<Sender, detail::identity_or_void_t>;
-  using coro_handle = std::experimental::coroutine_handle<>;
+    // using is_always_blocking = property_query<From, is_always_blocking<>>;
+    struct internal_receiver {
+        sender_awaiter* this_;
 
-  std::add_pointer_t<Sender> sender_{};
-  enum class state { empty, value, exception };
+        // using receiver_category = receiver_tag;
 
-  coro_handle continuation_{};
-  state state_ = state::empty;
+        template <class U>
+        void set_value(U&& value) noexcept(std::is_nothrow_constructible_v<value_type, U>) {
+            this_->m_data.template emplace<1>(std::forward<U>(value));
+            this_->m_continuation.resume();
+        }
 
-  union {
-    value_type value_{};
-    std::exception_ptr exception_;
-  };
+        void set_value() noexcept {
+            this_->m_data.template emplace<1>();
+            this_->m_continuation.resume();
+        }
 
-  //using is_always_blocking = property_query<From, is_always_blocking<>>;
+        template <typename Error>
+        void set_error(Error&& error) noexcept {
+            if constexpr(std::is_same<Error, std::exception_ptr>::value) {
+                this_->m_data.template emplace<2>(std::move(error));
+            } else {
+                this_->m_data.template emplace<2>(std::make_exception_ptr(std::move(error)));
+            }
+            // if (!is_always_blocking::value)
+            this_->m_continuation.resume();
+        }
 
-struct internal_receiver {
-    sender_awaiter* this_;
+        void set_done() noexcept {
+            this_->m_data.template emplace<0>(std::monostate{});
+            // if (!is_always_blocking::value)
+            this_->m_continuation.resume();
+        }
+    };
 
-    //using receiver_category = receiver_tag;
 
-    template <class U>
-    requires cor3ntin::corio::concepts::convertible_to<U, value_type>
-    void set_value(U&& value)
-      noexcept(std::is_nothrow_constructible<value_type, U>::value) {
-      this_->value_.construct(static_cast<U&&>(value));
-      this_->state_ = state::value;
-    }
+    using value_type = int;
+    using coro_handle = std::experimental::coroutine_handle<>;
 
-    template <class V = value_type>
-    requires std::is_void_v<V>
-    void set_value() noexcept {
-      this_->value_.construct();
-      this_->state_ = state::value;
-    }
+    coro_handle m_continuation{};
+    using operation_type = decltype(
+        corio::execution::connect(std::declval<Sender>(), std::declval<internal_receiver>()));
+    operation_type m_op;
+    std::variant<std::monostate, value_type, std::exception_ptr> m_data;
 
-    void set_done() noexcept {
-      //if (!is_always_blocking::value)
-        this_->continuation_.resume();
-    }
-
-    template<typename Error>
-    void set_error(Error error) noexcept {
-      assert(this_->state_ != state::value);
-      if constexpr(std::is_same<Error, std::exception_ptr>::value){
-        this_->exception_.construct(std::move(error));
-      } else {
-        this_->exception_.construct(std::make_exception_ptr(std::move(error)));
-      }
-      this_->state_ = state::exception;
-      //if (!is_always_blocking::value)
-      this_->continuation_.resume();
-    }
-  };
 
 public:
-  sender_awaiter() {}
-  sender_awaiter(Sender&& sender) noexcept
-  : sender_(std::addressof(sender))
-  {}
-  sender_awaiter(sender_awaiter &&that)
-    noexcept(std::is_nothrow_move_constructible<value_type>::value ||
-      std::is_void<value_type>::value)
-  : sender_(std::exchange(that.sender_, nullptr))
-  , continuation_{std::exchange(that.continuation_, {})}
-  , state_(that.state_) {
-    if (that.state_ == state::value) {
-        if constexpr(!std::is_void<value_type>::value) {
-          id(value_).construct(std::move(that.value_).get());
+    sender_awaiter(Sender sender) noexcept
+        : m_op(corio::execution::connect(std::move(sender), internal_receiver{this})) {
+        printf("CTR\n");
+    }
+    sender_awaiter(sender_awaiter&& that) = default;
+    ~sender_awaiter() {
+        printf("DTR\n");
+    }
+
+
+    static constexpr bool await_ready() noexcept {
+        return true;
+    }
+
+    // TODO HANDLE BLOCKING
+    void await_suspend(coro_handle continuation) noexcept {
+        printf("await_suspend\n");
+        m_continuation = continuation;
+        m_op.start();
+
+        return;
+    }
+
+    decltype(auto) await_resume() {
+        printf("await_resume\n");
+        switch(m_data.index()) {
+            case 0: throw operation_cancelled{}; break;
+            case 1: return std::get<1>(m_data);
+            case 2: std::rethrow_exception(std::move(std::get<2>(m_data))); break;
         }
-        else {
-            that.value_.destruct();
-            that.state_ = state::empty;
-        }
-    } else if (that.state_ == state::exception) {
-      exception_.construct(std::move(that.exception_).get());
-      that.exception_.destruct();
-      that.state_ = state::empty;
+        return std::get<1>(m_data);
     }
-  }
-
-  ~sender_awaiter() {
-    if (state_ == state::value) {
-      value_.destruct();
-    } else if (state_ == state::exception) {
-      exception_.destruct();
-    }
-  }
-
-  static constexpr bool await_ready() noexcept {
-    return false;
-  }
-
-  // Add detection and handling of blocking completion here, and
-  // return 'false' from await_suspend() in that case rather than
-  // potentially recursively resuming the awaiting coroutine which
-  // could eventually lead to a stack-overflow.
-  using await_suspend_result_t =
-    std::conditional_t<true, bool, void>;
-
-  await_suspend_result_t await_suspend(coro_handle continuation) noexcept {
-    continuation_ = continuation;
-    //pushmi::submit(static_cast<From&&>(*sender_), internal_receiver{this});
-    return await_suspend_result_t(); // return false or void
-  }
-
-  decltype(auto) await_resume() {
-    if (state_ == state::exception) {
-      std::rethrow_exception(std::move(exception_).get());
-    } else if (state_ == state::empty) {
-      //throw operation_cancelled{};
-    } else {
-      return std::move(value_).get();
-    }
-  }
 };
 
-template<typename From>
-sender_awaiter(From&&) -> sender_awaiter<From>;
+template <typename From>
+sender_awaiter(From)->sender_awaiter<From>;
 
-/*
-template <sender S>
-sender_awaiter<S> operator co_await(S&& sender) {
-    return static_cast<S&&>(from);
+template <cor3ntin::corio::execution::sender S>
+auto operator co_await(S&& sender) {
+    return cor3ntin::corio::sender_awaiter(std::forward<S>(sender));
 }
-*/
+
+}  // namespace cor3ntin::corio
+
 
 /*namespace awaitable_senders {
   // Any TypedSender that inherits from `sender` or `sender_traits` is

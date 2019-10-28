@@ -13,6 +13,7 @@ public:
     void set_done() noexcept {}
 };
 
+
 /*
 bool operator==(const stupid_executor&, const stupid_executor&) {
     return true;
@@ -22,15 +23,32 @@ bool operator!=(const stupid_executor&, const stupid_executor&) {
 };
 **/
 
+
+template <typename scheduler>
+cppcoro::task<> run_in_pool(scheduler my_scheduler) {
+    printf("Coro: %ul\n", std::this_thread::get_id());
+    cor3ntin::corio::sender_awaiter a{my_scheduler.schedule()};
+    auto x = co_await a;
+    printf("Coro: %ul\n", std::this_thread::get_id());
+}
+
 int main() {
+    printf("Main: %ul\n", std::this_thread::get_id());
     using namespace cor3ntin::corio::execution;
 
-    std::mutex m;
+    // std::mutex m;
 
     static_thread_pool p(20);
-    for(auto i = 0; i < 1000000; i++) {
+    static_assert(cor3ntin::corio::execution::sender<decltype(p.scheduler().schedule())>);
+
+
+    run_in_pool(p.scheduler());
+
+
+    for(auto i = 0; i < 10; i++) {
         auto sender = p.scheduler().schedule();
-        std::move(sender).spawn(as_receiver{[&m] { printf("%ul\n", std::this_thread::get_id()); }});
+        std::move(sender).spawn(
+            as_receiver{[] { printf("Receiver: %ul\n", std::this_thread::get_id()); }});
     }
 
     wait(p.depleted());

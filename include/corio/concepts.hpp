@@ -87,6 +87,27 @@ namespace execution {
     } set_error;
 
 
+    namespace __connect_ns {
+        struct __connect_base {};
+    }  // namespace __connect_ns
+
+    inline constexpr struct __connect_fn : __connect_ns::__connect_base {
+        template <typename Sender, typename Receiver>
+        requires cor3ntin::corio::tag_invocable<__connect_fn, Sender, Receiver> auto
+        operator()(Sender&& s, Receiver&& r) const {
+            return cor3ntin::corio::tag_invoke(*this, std::forward<Sender>(s), (Receiver &&) r);
+        }
+
+        template <typename Sender, typename Receiver>
+        requires requires(Sender&& s, Receiver&& r) {
+            std::forward<Sender>(s).connect((Receiver &&) r);
+        }
+        friend auto tag_invoke(__connect_fn, Sender&& s, Receiver&& r) {
+            return std::forward<Sender>(s).connect((Receiver &&) r);
+        }
+    } connect;
+
+
     template <typename T, typename E = std::exception_ptr>
     concept receiver = concepts::move_constructible<std::remove_cvref_t<T>>&&
         details::nothrow_move_or_copy_constructible<std::remove_cvref_t<T>>&& requires(T&& t,
@@ -102,13 +123,35 @@ namespace execution {
         execution::set_value((T &&) t, (Val &&) val...);
     };
 
+    namespace details {
+        template <typename T>
+        concept sealed_object = !concepts::move_constructible<std::remove_cvref_t<T>> &&
+            !concepts::copy_constructible<std::remove_cvref_t<T>>;
+    }
+
+
+    /*template <typename T>
+    concept operation = requires(T& t) {
+        { t.start(); }
+        noexcept;
+    };
+
+    template <typename Op>
+    concept operation = details::sealed_object<Op> && requires(Op& op) {
+         //execution::start(op)->void;
+     }
+
+     */
+
 
     namespace details {
         template <class S, class R>
-        concept sender_to_impl = true; /*requires(S&& s, R&& r) {
-            execution::submit((S &&) s, (R &&) r);
-        };*/
-    }                                  // namespace details
+        concept sender_to_impl = requires(S&& s, R&& r) {
+            execution::connect(std::forward<S>(s), (R &&) r);
+            /*{ execution::spawn((S &&) s, (R &&) r) }
+            ->void;*/
+        };
+    }  // namespace details
     template <typename S>
     concept sender = concepts::move_constructible<std::remove_cvref_t<S>>&&
         details::sender_to_impl<S, sink_receiver>;
@@ -121,17 +164,6 @@ namespace execution {
 }  // namespace execution
 
 }  // namespace cor3ntin::corio
-
-// test
-
-/*struct stupid_executor {
-    template <typename Receiver>
-    requires cor3ntin::corio::execution::receiver<Receiver>
-    void submit(Receiver&& r) const {
-        return r.set_value();
-    }
-};*/
-
 
 namespace {
 

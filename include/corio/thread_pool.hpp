@@ -178,8 +178,8 @@ class static_thread_pool {
         static_thread_pool& m_pool;
 
     public:
-        template <execution::receiver R>
-        auto connect(R&& r) && {
+        template <typename R>
+            auto connect(R&& r) && noexcept {
             return depleted_operation{std::move(*this), std::forward<R>(r)};
         }
 
@@ -245,8 +245,8 @@ public:
         while(true) {
             if(m_stopped)
                 return;
-            m_condition.wait(lock);
 
+            m_condition.wait(lock);
 
             while(m_head) {
                 operation_base& op = *m_head;

@@ -1,3 +1,6 @@
 [submodule "cmcstl2"]
 	path = cmcstl2
 	url = https://github.com/CaseyCarter/cmcstl2
+[submodule "cppcoro"]
+	path = cppcoro
+	url = https://github.com/lewissbaker/cppcoro.git
