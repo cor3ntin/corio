@@ -8,87 +8,6 @@
 
 namespace cor3ntin::corio {
 
-bool wait(execution::sender auto&& send) {
-
-    struct state {
-        std::mutex m;
-        std::condition_variable c;
-        bool cancelled = false;
-        std::exception_ptr err;
-    } s;
-
-    struct r {
-        void set_value() {
-            s.c.notify_one();
-        }
-
-        void set_done() {
-            s.cancelled = true;
-            s.c.notify_one();
-        }
-
-        void set_error(std::exception_ptr ptr) {
-            s.err = ptr;
-        }
-        state& s;
-    };
-    struct r r {
-        s
-    };
-
-    auto op = std::move(send).connect(std::move(r));
-    op.start();
-
-    std::unique_lock<std::mutex> lock(s.m);
-    s.c.wait(lock);
-
-    if(s.err) {
-        std::rethrow_exception(s.err);
-    }
-    return !s.cancelled;
-}
-
-namespace details {}
-
-template <typename Sender, typename Receiver>
-struct spawned_op {
-    struct wrapped_receiver {
-        spawned_op* m_op;
-        explicit wrapped_receiver(spawned_op* op) noexcept : m_op(op) {}
-        template <typename... Values>
-        void set_value(Values&&... values) noexcept {
-            m_op->m_receiver.set_value((Values &&) values...);
-            delete m_op;
-        }
-        template <typename Error>
-        void set_error(Error&& error) noexcept {
-            m_op->m_receiver.set_error((Error &&) error);
-            delete m_op;
-        }
-        void set_done() noexcept {
-            m_op->m_receiver.set_done();
-            delete m_op;
-        }
-    };
-    spawned_op(Sender&& sender, Receiver&& receiver)
-        : m_receiver((Receiver &&) receiver)
-        , m_inner(std::move(sender).connect(wrapped_receiver{this})) {}
-    void start() & noexcept {
-        m_inner.start();
-    }
-    Receiver m_receiver;
-    typename Sender::template operation_type<Sender, wrapped_receiver> m_inner;
-};
-
-
-template <typename Sender, typename Receiver>
-void spawn(Sender&& sender, Receiver&& receiver) noexcept {
-    auto* op = new spawned_op<Sender, std::remove_cvref_t<Receiver>>((Sender &&) sender,
-                                                                     (Receiver &&) receiver);
-    op->start();
-}
-
-
 class static_thread_pool {
 
     class stp_scheduler;
@@ -114,11 +33,6 @@ class static_thread_pool {
         template <execution::receiver R>
         auto connect(R&& r) && {
             return schedule_operation(std::move(*this), std::forward<R>(r));
-        }
-
-        template <execution::receiver R>
-        void spawn(R&& r) && {
-            return corio::spawn(std::move(*this), std::forward<R>(r));
         }
     };
 
@@ -169,23 +83,18 @@ class static_thread_pool {
 
     class depleted_sender {
         friend class static_thread_pool;
-
-        template <typename sender, execution::receiver R>
-        using operation_type = depleted_operation<R>;
-
         depleted_sender(static_thread_pool& pool) : m_pool(pool) {}
 
         static_thread_pool& m_pool;
 
     public:
+        template <typename sender, execution::receiver R>
+        using operation_type = depleted_operation<R>;
+
+
         template <typename R>
             auto connect(R&& r) && noexcept {
             return depleted_operation{std::move(*this), std::forward<R>(r)};
-        }
-
-        template <execution::receiver R>
-        void spawn(R&& r) && {
-            return corio::spawn(std::move(*this), std::forward<R>(r));
         }
     };
 
@@ -342,7 +251,6 @@ private:
     operation_base* m_head = nullptr;
     operation_base* m_tail = nullptr;
 
-    // I was lazy
     operation_base* m_depleted_head = nullptr;
     operation_base* m_depleted_tail = nullptr;
     bool m_stopped = false;

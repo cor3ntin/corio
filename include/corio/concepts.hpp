@@ -2,10 +2,11 @@
 #include <stl2/concepts.hpp>
 #include <type_traits>
 #include <exception>
-#include <corio/tag_invoke.hpp>
 #include <optional>
 #include <functional>
 #include <cstdio>
+#include <corio/tag_invoke.hpp>
+#include <corio/spawn.hpp>
 
 namespace cor3ntin::corio {
 
@@ -107,6 +108,27 @@ namespace execution {
         }
     } connect;
 
+    namespace __start_ns {
+        struct __start_base {};
+    }  // namespace __start_ns
+
+    inline constexpr struct __start_fn : __start_ns::__start_base {
+        template <typename Operation>
+        requires cor3ntin::corio::tag_invocable<__start_fn, Operation&> void
+        operator()(Operation& op) const {
+            return cor3ntin::corio::tag_invoke(*this, op);
+        }
+
+        template <typename Operation>
+        requires requires(Operation& op) {
+            { op.start() }
+            ->concepts::same_as<void>;
+        }
+        friend auto tag_invoke(__start_fn, Operation& op) {
+            op.start();
+        }
+    } start;
+
 
     template <typename T, typename E = std::exception_ptr>
     concept receiver = concepts::move_constructible<std::remove_cvref_t<T>>&&
@@ -130,26 +152,19 @@ namespace execution {
     }
 
 
-    /*template <typename T>
-    concept operation = requires(T& t) {
-        { t.start(); }
-        noexcept;
-    };
-
     template <typename Op>
-    concept operation = details::sealed_object<Op> && requires(Op& op) {
-         //execution::start(op)->void;
-     }
-
-     */
+    concept operation = details::sealed_object<Op>&& requires(Op& t) {
+        { execution::start(t) }
+        ->concepts::same_as<void>;
+    };
 
 
     namespace details {
         template <class S, class R>
         concept sender_to_impl = requires(S&& s, R&& r) {
-            execution::connect(std::forward<S>(s), (R &&) r);
-            /*{ execution::spawn((S &&) s, (R &&) r) }
-            ->void;*/
+            {execution::connect(std::forward<S>(s), (R &&) r)};
+            { execution::spawn((S &&) s, (R &&) r) }
+            ->concepts::same_as<void>;
         };
     }  // namespace details
     template <typename S>
@@ -169,8 +184,4 @@ namespace {
 
 using namespace cor3ntin::corio;
 static_assert(execution::receiver<execution::sink_receiver>);
-/*static_assert(
-    execution::receiver<execution::details::as_receiver<execution::details::invocable_archetype>>);
-static_assert(execution::receiver_of<execution::sink_receiver, int, int>);
-static_assert(concepts::invocable<execution::details::as_invocable<execution::sink_receiver>>);*/
 }  // namespace
