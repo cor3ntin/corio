@@ -176,6 +176,13 @@ namespace execution {
     concept sender_to = sender<S>&& receiver<R>&& details::sender_to_impl<S, R>;
 
 
+    template <typename S>
+    concept scheduler = requires(S s) {
+        { s.schedule() }
+        ->sender;
+    };
+
+
 }  // namespace execution
 
 }  // namespace cor3ntin::corio

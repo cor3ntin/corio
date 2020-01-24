@@ -65,7 +65,7 @@ private:
     };
 
 
-    using value_type = int;
+    using value_type = std::string;
     using coro_handle = std::experimental::coroutine_handle<>;
 
     coro_handle m_continuation{};

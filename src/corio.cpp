@@ -37,7 +37,46 @@ double compute_pi() {
         static_cast<double>(jobs * iters);
 }
 
+using namespace cor3ntin::corio;
+template <execution::scheduler scheduler>
+oneway_task ping(scheduler sch, auto r, auto w) {
+    try {
+        for(int n = 10; n; n--) {
+            co_await w.write("ping");
+            co_await sch.schedule(std::chrono::milliseconds(100));
+            std::string s = co_await r.read();
+            std::cout << s << " " << n << "\n";
+        }
+    } catch(operation_cancelled c) {
+        std::cout << "ping cancelled\n";
+    }
+    // channel is closed (RAII)
+}
+
+template <execution::scheduler scheduler>
+oneway_task pong(scheduler sch, auto r, auto w, stop_source& stop) {
+    try {
+        for(int n = 0;; n++) {
+            std::string s = co_await r.read();
+            std::cout << s << " " << n << "\n";
+            co_await sch.schedule(std::chrono::milliseconds(100));
+            co_await w.write("pong");
+        }
+    } catch(operation_cancelled c) {
+        std::cout << "pong cancelled\n";
+    } catch(channel_closed c) {
+        std::cout << "channel closed\n";
+        stop.request_stop();  // ask the context to stop itself
+    }
+}
 
 int main() {
-    std::cout << compute_pi() << "\n";
+    stop_source stop;
+    io_uring_context ctx;
+    std::thread t([&ctx, &stop] { ctx.run(stop.get_token()); });
+    auto [r1, w1] = make_channel<std::string>(ctx);
+    auto [r2, w2] = make_channel<std::string>(ctx);
+    ping(ctx.scheduler(), std::move(r1), std::move(w2));
+    pong(ctx.scheduler(), std::move(r2), std::move(w1), stop);
+    t.join();
 }
