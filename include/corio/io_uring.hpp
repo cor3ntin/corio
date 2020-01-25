@@ -54,6 +54,14 @@ namespace _iouring {
         deadline m_deadline;
 
     public:
+        template <template <typename...> class Variant, template <typename...> class Tuple>
+        using value_types = Variant<Tuple<>>;
+
+        template <template <typename...> class Variant>
+        using error_types = Variant<>;
+
+        static constexpr bool sends_done = true;
+
         template <typename Sender, execution::receiver R>
         using operation_type = schedule_operation<R>;
 
@@ -78,6 +86,14 @@ namespace _iouring {
         const operation_base* const m_op;
 
     public:
+        template <template <typename...> class Variant, template <typename...> class Tuple>
+        using value_types = Variant<Tuple<>>;
+
+        template <template <typename...> class Variant>
+        using error_types = Variant<>;
+
+        static constexpr bool sends_done = true;
+
         template <typename Sender, execution::receiver R>
         using operation_type = schedule_operation<R>;
 
@@ -253,6 +269,14 @@ namespace details {
             C* m_channel;
 
         public:
+            template <template <typename...> class Variant, template <typename...> class Tuple>
+            using value_types = Variant<Tuple<T>>;
+
+            template <template <typename...> class Variant>
+            using error_types = Variant<>;
+
+            static constexpr bool sends_done = true;
+
             template <typename Sender, execution::receiver R>
             using operation_type = read_operation<R>;
 
@@ -271,6 +295,14 @@ namespace details {
             C* m_channel;
 
         public:
+            template <template <typename...> class Variant, template <typename...> class Tuple>
+            using value_types = Variant<Tuple<T>>;
+
+            template <template <typename...> class Variant>
+            using error_types = Variant<>;
+
+            static constexpr bool sends_done = true;
+
             template <typename Sender, execution::receiver R>
             using operation_type = write_operation<R>;
 

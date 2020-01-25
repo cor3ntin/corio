@@ -16,7 +16,43 @@ namespace details {
     template <class T>
     concept nothrow_move_or_copy_constructible =
         std::is_nothrow_move_constructible_v<T> || concepts::copy_constructible<T>;
-}
+
+
+    template <typename... Values>
+    struct single_type {
+        // empty so we are SFINAE friendly.
+    };
+
+    template <typename T>
+    struct single_type<T> {
+        using type = T;
+    };
+
+    template <typename... Types>
+    struct single_value_type {
+        using type = std::tuple<Types...>;
+    };
+
+    template <typename T>
+    struct single_value_type<T> {
+        using type = T;
+    };
+
+    template <>
+    struct single_value_type<> {
+        using type = void;
+    };
+    template <typename... Args>
+    struct is_empty_list : std::bool_constant<(sizeof...(Args) == 0)> {};
+    template <typename... Args>
+    struct has_1_elem_list : std::bool_constant<(sizeof...(Args) == 1)> {};
+
+    struct empty_result_t {};
+
+    template <typename T>
+    using non_void_t = std::conditional_t<std::is_void_v<T>, empty_result_t, T>;
+
+}  // namespace details
 
 namespace execution {
 
@@ -175,6 +211,65 @@ namespace execution {
     template <class S, class R>
     concept sender_to = sender<S>&& receiver<R>&& details::sender_to_impl<S, R>;
 
+
+    template <template <template <class...> class, template <class...> class> class>
+    struct __test_has_values;
+
+    template <template <template <class...> class> class>
+    struct __test_has_errors;
+
+    template <class T>
+    concept __has_sender_types = requires {
+        typename __test_has_values<T::template value_types>;
+        typename __test_has_errors<T::template error_types>;
+        typename std::bool_constant<T::sends_done>;
+    };
+    struct __void_sender {
+        template <template <class...> class Tuple, template <class...> class Variant>
+        using value_types = Variant<Tuple<>>;
+        template <template <class...> class Variant>
+        using error_types = Variant<std::exception_ptr>;
+        static constexpr bool sends_done = true;
+    };
+    template <class S>
+    struct __typed_sender {
+        template <template <class...> class Tuple, template <class...> class Variant>
+        using value_types = typename S::template value_types<Tuple, Variant>;
+        template <template <class...> class Variant>
+        using error_types = typename S::template error_types<Variant>;
+        static constexpr bool sends_done = S::sends_done;
+    };
+
+    using sender_base = struct __sender_base {};
+    struct __no_sender_traits {
+        using __unspecialized = void;
+    };
+
+    template <class S>
+    auto __sender_traits_base_fn() {
+        if constexpr(__has_sender_types<S>) {
+            return __typed_sender<S>{};
+        } else if constexpr(concepts::derived_from<S, sender_base>) {
+            return sender_base{};
+        } else {
+            return __no_sender_traits{};
+        }
+    }
+    template <class S>
+    struct sender_traits : decltype(__sender_traits_base_fn<S>()) {};
+
+    template <class S>
+    concept typed_sender = sender<S>&& __has_sender_types<sender_traits<std::remove_cvref_t<S>>>;
+
+
+    template <typename Sender>
+    using single_value_result_t = typename std::remove_reference_t<Sender>::template value_types<
+        corio::details::single_type, corio::details::single_value_type>::type::type;
+
+    template <class S>
+    concept typed_sender_single = typed_sender<S>&& requires {
+        typename single_value_result_t<S>;
+    };
 
     template <typename S>
     concept scheduler = requires(S s) {

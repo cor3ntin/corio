@@ -31,23 +31,17 @@ struct oneway_task {
     };
 };
 
-template <typename Sender>
+template <typename Sender, typename Value>
 struct sender_awaiter {
 private:
     struct internal_receiver {
         sender_awaiter* this_;
 
-        template <class U>
-        void set_value(U&& value) {
-            this_->m_data.template emplace<1>(std::forward<U>(value));
+        template <typename... Values>
+        void set_value(Values&&... value) {
+            this_->m_data.template emplace<1>(std::forward<Values>(value)...);
             this_->m_continuation.resume();
         }
-
-        void set_value() {
-            this_->m_data.template emplace<1>();
-            this_->m_continuation.resume();
-        }
-
         template <typename Error>
         void set_error(Error&& error) {
             if constexpr(std::is_same<Error, std::exception_ptr>::value) {
@@ -65,14 +59,14 @@ private:
     };
 
 
-    using value_type = std::string;
+    using value_type = Value;
     using coro_handle = std::experimental::coroutine_handle<>;
 
     coro_handle m_continuation{};
     using operation_type = decltype(
         corio::execution::connect(std::declval<Sender>(), std::declval<internal_receiver>()));
     operation_type m_op;
-    std::variant<std::monostate, value_type, std::exception_ptr> m_data;
+    std::variant<std::monostate, details::non_void_t<value_type>, std::exception_ptr> m_data;
 
 
 public:
@@ -102,12 +96,14 @@ public:
     }
 };
 
-template <typename From>
-sender_awaiter(From)->sender_awaiter<From>;
-
 template <cor3ntin::corio::execution::sender S>
 auto operator co_await(S&& sender) {
-    return cor3ntin::corio::sender_awaiter(std::forward<S>(sender));
+    return cor3ntin::corio::sender_awaiter<S, void>(std::forward<S>(sender));
+}
+template <cor3ntin::corio::execution::typed_sender_single S>
+auto operator co_await(S&& sender) {
+    return cor3ntin::corio::sender_awaiter<S, cor3ntin::corio::execution::single_value_result_t<S>>(
+        std::forward<S>(sender));
 }
 
 }  // namespace cor3ntin::corio

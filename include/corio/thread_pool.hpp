@@ -15,18 +15,28 @@ class static_thread_pool {
     class schedule_operation;
 
     class task_sender {
+    public:
+        template <template <typename...> class Variant, template <typename...> class Tuple>
+        using value_types = Variant<Tuple<>>;
+
+        template <template <typename...> class Variant>
+        using error_types = Variant<>;
+
+        static constexpr bool sends_done = true;
+
         template <typename R>
         friend class schedule_operation;
         friend class stp_scheduler;
 
+        template <typename Sender, execution::receiver R>
+        using operation_type = schedule_operation<R>;
 
+
+    private:
         task_sender(static_thread_pool& pool) : m_pool(pool) {}
         static_thread_pool& m_pool;
 
     public:
-        template <typename Sender, execution::receiver R>
-        using operation_type = schedule_operation<R>;
-
         task_sender(const task_sender&) = delete;
         task_sender(task_sender&&) noexcept = default;
 
@@ -88,6 +98,14 @@ class static_thread_pool {
         static_thread_pool& m_pool;
 
     public:
+        template <template <typename...> class Variant, template <typename...> class Tuple>
+        using value_types = Variant<Tuple<>>;
+
+        template <template <typename...> class Variant>
+        using error_types = Variant<>;
+
+        static constexpr bool sends_done = true;
+
         template <typename sender, execution::receiver R>
         using operation_type = depleted_operation<R>;
 
