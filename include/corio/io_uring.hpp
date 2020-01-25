@@ -110,7 +110,7 @@ namespace _iouring {
     protected:
         operation_base* m_prev = nullptr;
         operation_type m_type : 7;
-        bool m_cancelled = false;
+        bool m_cancelled : 1 = false;
         io_uring_context* m_ctx;
         virtual void set_result(const io_uring_cqe* const res) noexcept = 0;
         virtual void set_done() noexcept = 0;
@@ -229,6 +229,7 @@ namespace _iouring {
             : _iouring::operation_base(operation_type::channel, ctx), m_op_fd(fd) {}
 
     protected:
+        bool m_registered = false;
         int m_op_fd;
     };
 
@@ -286,7 +287,7 @@ namespace details {
 
         public:
             read_operation(read_sender&& s, R&& receiver)
-                : channel_operation_base(s.m_ctx, s.m_channel->m_read_fd[0])
+                : channel_operation_base(s.m_ctx, s.m_channel->m_read_fd)
                 , m_sender(std::move(s))
                 , m_receiver(std::move(receiver)) {}
 
@@ -296,12 +297,13 @@ namespace details {
 
         private:
             void set_result(const io_uring_cqe* const res) noexcept override {
+                const auto* chan = m_sender.m_channel;
                 if(res->res < 0) {
                     return;
                 }
-                char c;
-                read(m_sender.m_channel->m_read_fd[0], &c, 1);
-                if(c == CHANNEL_CLOSED && m_sender.m_channel->m_queue.empty()) {
+                uint64_t c;
+                eventfd_read(chan->m_read_fd, &c);
+                if(chan->m_capacity == 0 && chan->m_queue.empty()) {
                     m_receiver.set_error(channel_closed());
                     return;
                 }
@@ -327,8 +329,7 @@ namespace details {
                 m_receiver.set_value(std::move(value));
             }
             void notify_read() {
-                char c = 0;
-                ::write(m_sender.m_channel->m_write_fd[1], &c, 1);
+                eventfd_write(m_sender.m_channel->m_write_fd, 0);
             }
 
         private:
@@ -344,7 +345,7 @@ namespace details {
 
         public:
             write_operation(write_sender&& s, R&& receiver)
-                : channel_operation_base(s.m_ctx, s.m_channel->m_write_fd[0])
+                : channel_operation_base(s.m_ctx, s.m_channel->m_write_fd)
                 , m_sender(std::move(s))
                 , m_receiver(std::move(receiver)) {}
 
@@ -354,12 +355,13 @@ namespace details {
 
         private:
             void set_result(const io_uring_cqe* const res) noexcept override {
+                C* chan = m_sender.m_channel;
                 if(res->res < 0) {
                     return;
                 }
-                char c;
-                read(m_sender.m_channel->m_read_fd[0], &c, 1);
-                if(c == CHANNEL_CLOSED) {
+                uint64_t c;
+                eventfd_read(m_sender.m_channel->m_read_fd, &c);
+                if(chan->m_capacity == 0) {
                     m_receiver.set_error(channel_closed());
                 }
                 handle_write();
@@ -383,8 +385,7 @@ namespace details {
             }
 
             void notify_write() {
-                char c = 0;
-                write(m_sender.m_channel->m_read_fd[1], &c, 1);
+                eventfd_write(m_sender.m_channel->m_read_fd, 0);
             }
 
         private:
@@ -394,23 +395,18 @@ namespace details {
 
     public:
         channel_implementation(io_uring_context& ctx, std::size_t capacity) : m_ctx(ctx) {
-            if(pipe(m_read_fd) != 0) {
+            m_read_fd = eventfd(0, O_NONBLOCK);
+            m_write_fd = eventfd(0, O_NONBLOCK);
+            if(m_read_fd <= 0 || m_write_fd <= 0) {
                 fprintf(stderr, "ring setup failed %d %s\n", errno, strerror(errno));
             }
-            if(pipe(m_write_fd) != 0) {
-                fprintf(stderr, "ring setup failed %d %s\n", errno, strerror(errno));
-            }
-            pipe2(m_read_fd, O_NONBLOCK);
-            pipe2(m_write_fd, O_NONBLOCK);
             this->m_capacity = capacity;
         }
         channel_implementation(const channel_implementation&) = delete;
         ~channel_implementation() {
             std::cout << "delete\n";
-            ::close(m_read_fd[0]);
-            ::close(m_read_fd[1]);
-            ::close(m_write_fd[0]);
-            ::close(m_write_fd[1]);
+            ::close(m_read_fd);
+            ::close(m_write_fd);
         }
 
     protected:
@@ -424,16 +420,15 @@ namespace details {
 
         void close() {
             this->m_capacity = 0;
-            write(m_read_fd[1], &CHANNEL_CLOSED, 1);
-            write(m_write_fd[1], &CHANNEL_CLOSED, 1);
+            eventfd_write(m_read_fd, 0);
+            eventfd_write(m_write_fd, 0);
         }
 
-        static constexpr char CHANNEL_CLOSED = 0xFF;
-
     private:
+        bool registered = false;
         io_uring_context& m_ctx;
-        int m_read_fd[2];
-        int m_write_fd[2];
+        int m_read_fd;
+        int m_write_fd;
     };
 }  // namespace details
 
@@ -442,18 +437,17 @@ class io_uring_context {
 
 public:
     io_uring_context() {
-        init();
+        // init();
     }
-    ~io_uring_context() {
-        io_uring_queue_exit(&m_ring);
-    }
+    ~io_uring_context() {}
 
     void run(corio::stop_token stop_token) {
-
         stop_callback _(stop_token, [this] {
             m_stopped = true;
             notify();
         });
+        init();
+        schedule_queue_read();
         while(!m_stopped || m_queue.front() || m_head) {
             if(m_stopped) {
                 cancel_pending_operations();
@@ -473,9 +467,9 @@ public:
                 // ignore, maybe a cancel operation ?
             } else if(cqe->user_data == uint64_t(this)) {
                 std::cout << "Queue notified\n";
+                uint64_t c;
+                eventfd_read(m_notify_fd, &c);
                 m_notify = true;
-                char c;
-                read(m_notify_fd[0], &c, 1);
             } else {
                 std::cout << "Operation " << cqe->res << " " << cqe->user_data << "\n";
                 auto op = reinterpret_cast<_iouring::operation_base*>(cqe->user_data);
@@ -486,6 +480,7 @@ public:
             }
             io_uring_cqe_seen(&m_ring, cqe);
         }
+        io_uring_queue_exit(&m_ring);
     }
     auto scheduler() noexcept {
         return _iouring::scheduler{this};
@@ -493,26 +488,29 @@ public:
 
 private:
     static constexpr int URING_ENTRIES = 128;
-    static constexpr uint64_t NOTIFY_QUEUE_EVENT = (uint64_t)-2;
 
     struct io_uring m_ring;
-    int m_notify_fd[2];
+    std::atomic_int m_notify_fd = -1;
     intrusive_mpsc_queue<_iouring::operation_base> m_queue;
-    char m_command;
     std::atomic_bool m_notify = true;
     std::atomic_bool m_stopped = false;
     // Maintain a double-linked list of in-flight operation so we can cancel them
     _iouring::operation_base* m_head = nullptr;
 
     void init() {
-        auto ret = io_uring_queue_init(8, &m_ring, 0);
+        // 0 (instead of 1) seems to case system wide hanging, investigate why
+        m_notify_fd = ::eventfd(1, EFD_NONBLOCK);
+        if(m_notify_fd < 0) {
+            fprintf(stderr, "ring setup failed %d %s\n", errno, strerror(errno));
+        }
+
+        auto ret = io_uring_queue_init(URING_ENTRIES, &m_ring, 0);
         if(ret) {
             fprintf(stderr, "ring setup failed %d %s\n", ret, strerror(-ret));
             std::terminate();
         }
-
-        pipe2(m_notify_fd, O_NONBLOCK);
-        schedule_queue_read();
+        // this seems to hang the kernel ?
+        // io_uring_register_eventfd(&m_ring, m_notify_fd);
     }
 
     void enqueue_operation(_iouring::operation_base* op) {
@@ -523,19 +521,19 @@ private:
         notify();
     }
     void notify() {
-        static const char n = 0x01;
-        write(m_notify_fd[1], &n, 1);
+        eventfd_write(m_notify_fd, 0);
     }
 
     void schedule_queue_read() {
         auto sqe = io_uring_get_sqe(&m_ring);
         if(!sqe) {
-            std::cout << "No sqe";
-            // Queue full - not sure what we should do
+            std::cout << "No sqe\n\n";
+            // Queue full - not m_notifysure what we should do
         }
         std::cout << "Prep read\n";
-        io_uring_prep_poll_add(sqe, m_notify_fd[0], POLLIN);
+        io_uring_prep_poll_add(sqe, m_notify_fd, POLLIN);
         sqe->user_data = uint64_t(this);
+        m_notify = false;
     }
 
     void schedule_pendings() {
@@ -624,6 +622,9 @@ private:
         return true;
     }
     bool try_schedule_one(io_uring_sqe* sqe, _iouring::channel_operation_base* op) {
+        if(!op->m_registered) {
+            io_uring_register_eventfd(&m_ring, op->m_op_fd);
+        }
         io_uring_prep_poll_add(sqe, op->m_op_fd, POLLIN);
         sqe->user_data = uint64_t(op);
         return true;
@@ -641,6 +642,5 @@ namespace _iouring {
         m_ctx->enqueue_operation(this);
     }
 }  // namespace _iouring
-
 
 }  // namespace cor3ntin::corio
