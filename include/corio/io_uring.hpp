@@ -324,16 +324,17 @@ namespace details {
                 , m_receiver(std::move(receiver)) {}
 
             void start() noexcept override {
-                _iouring::channel_operation_base::start();
+                handle_read();
             }
 
         private:
             void set_result(const io_uring_cqe* const res) noexcept override {
                 const auto* chan = m_sender.m_channel;
                 if(res->res < 0) {
+                    execution::set_error(m_receiver, channel_closed{});
                     return;
                 }
-                uint64_t c;
+                eventfd_t c;
                 eventfd_read(chan->m_read_fd, &c);
                 if(chan->m_capacity == 0 && chan->m_queue.empty()) {
                     execution::set_error(m_receiver, channel_closed{});
@@ -389,9 +390,10 @@ namespace details {
             void set_result(const io_uring_cqe* const res) noexcept override {
                 C* chan = m_sender.m_channel;
                 if(res->res < 0) {
+                    execution::set_error(m_receiver, channel_closed{});
                     return;
                 }
-                uint64_t c;
+                eventfd_t c;
                 eventfd_read(m_sender.m_channel->m_read_fd, &c);
                 if(chan->m_capacity == 0) {
                     execution::set_error(m_receiver, channel_closed{});
@@ -417,7 +419,7 @@ namespace details {
             }
 
             void notify_write() {
-                eventfd_write(m_sender.m_channel->m_read_fd, 0);
+                eventfd_write(m_sender.m_channel->m_read_fd, 1);
             }
 
         private:
@@ -427,8 +429,8 @@ namespace details {
 
     public:
         channel_implementation(io_uring_context& ctx, std::size_t capacity) : m_ctx(ctx) {
-            m_read_fd = eventfd(0, O_NONBLOCK);
-            m_write_fd = eventfd(0, O_NONBLOCK);
+            m_read_fd = eventfd(0, O_NONBLOCK | O_CLOEXEC);
+            m_write_fd = eventfd(0, O_NONBLOCK | O_CLOEXEC);
             if(m_read_fd <= 0 || m_write_fd <= 0) {
                 fprintf(stderr, "ring setup failed %d %s\n", errno, strerror(errno));
             }
@@ -452,12 +454,11 @@ namespace details {
 
         void close() {
             this->m_capacity = 0;
-            eventfd_write(m_read_fd, 0);
-            eventfd_write(m_write_fd, 0);
+            eventfd_write(m_read_fd, 1);
+            eventfd_write(m_write_fd, 1);
         }
 
     private:
-        bool registered = false;
         io_uring_context& m_ctx;
         int m_read_fd;
         int m_write_fd;
@@ -530,8 +531,7 @@ private:
     _iouring::operation_base* m_head = nullptr;
 
     void init() {
-        // 0 (instead of 1) seems to case system wide hanging, investigate why
-        m_notify_fd = ::eventfd(1, EFD_NONBLOCK);
+        m_notify_fd = ::eventfd(0, O_NONBLOCK);
         if(m_notify_fd < 0) {
             fprintf(stderr, "ring setup failed %d %s\n", errno, strerror(errno));
         }
@@ -541,8 +541,6 @@ private:
             fprintf(stderr, "ring setup failed %d %s\n", ret, strerror(-ret));
             std::terminate();
         }
-        // this seems to hang the kernel ?
-        // io_uring_register_eventfd(&m_ring, m_notify_fd);
     }
 
     void enqueue_operation(_iouring::operation_base* op) {
@@ -654,9 +652,6 @@ private:
         return true;
     }
     bool try_schedule_one(io_uring_sqe* sqe, _iouring::channel_operation_base* op) {
-        if(!op->m_registered) {
-            io_uring_register_eventfd(&m_ring, op->m_op_fd);
-        }
         io_uring_prep_poll_add(sqe, op->m_op_fd, POLLIN);
         sqe->user_data = uint64_t(op);
         return true;
