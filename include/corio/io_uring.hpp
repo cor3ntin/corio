@@ -172,7 +172,7 @@ namespace _iouring {
     protected:
         void set_result(const io_uring_cqe* const cqe) noexcept override {
             if(cqe->res >= 0) {
-                m_receiver.set_value();
+                execution::set_value(m_receiver);
             }
         }
 
@@ -207,11 +207,11 @@ namespace _iouring {
     protected:
         void set_result(const io_uring_cqe* const cqe) noexcept override {
             if(cqe->res >= 0 || cqe->res == -ETIME) {
-                m_receiver.set_value();
+                execution::set_value(m_receiver);
             }
         }
         virtual void set_done() noexcept override {
-            m_receiver.set_done();
+            execution::set_done(m_receiver);
         }
 
     private:
@@ -336,14 +336,14 @@ namespace details {
                 uint64_t c;
                 eventfd_read(chan->m_read_fd, &c);
                 if(chan->m_capacity == 0 && chan->m_queue.empty()) {
-                    m_receiver.set_error(channel_closed());
+                    execution::set_error(m_receiver, channel_closed{});
                     return;
                 }
                 handle_read();
             }
 
             void set_done() noexcept override {
-                m_receiver.set_done();
+                execution::set_done(m_receiver);
             }
 
             void handle_read() {
@@ -358,7 +358,7 @@ namespace details {
                 channel->m_queue.pop();
                 if(channel->m_capacity != 0)
                     notify_read();
-                m_receiver.set_value(std::move(value));
+                execution::set_value(m_receiver, std::move(value));
             }
             void notify_read() {
                 eventfd_write(m_sender.m_channel->m_write_fd, 0);
@@ -394,13 +394,13 @@ namespace details {
                 uint64_t c;
                 eventfd_read(m_sender.m_channel->m_read_fd, &c);
                 if(chan->m_capacity == 0) {
-                    m_receiver.set_error(channel_closed());
+                    execution::set_error(m_receiver, channel_closed{});
                 }
                 handle_write();
             }
 
             void set_done() noexcept override {
-                m_receiver.set_done();
+                execution::set_done(m_receiver);
             }
 
             void handle_write() {
@@ -413,7 +413,7 @@ namespace details {
                 }
                 channel->m_queue.push(std::move(m_sender.m_value));
                 notify_write();
-                m_receiver.set_value();
+                execution::set_value(m_receiver);
             }
 
             void notify_write() {
