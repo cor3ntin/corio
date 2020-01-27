@@ -39,33 +39,30 @@ double compute_pi() {
 
 using namespace cor3ntin::corio;
 template <execution::scheduler scheduler>
-oneway_task ping(scheduler sch, auto r, auto w) {
+oneway_task ping(scheduler sch, auto r, auto w, int i) {
     try {
-        for(int n = 10; n; n--) {
-            co_await w.write("ping");
-            co_await sch.schedule(std::chrono::milliseconds(100));
-            std::string s = co_await r.read();
-            std::cout << s << " " << n << "\n";
-        }
+        co_await sch.schedule(std::chrono::milliseconds(1000));
+        co_await w.write(i);
+        std::cout << "Wrote Ping -->" << i << "\n";
+
     } catch(operation_cancelled c) {
         std::cout << "ping cancelled\n";
+    } catch(channel_closed c) {
+        std::cout << "channel closed !?\n";
     }
     // channel is closed (RAII)
 }
 
 template <execution::scheduler scheduler>
-oneway_task pong(scheduler sch, auto r, auto w, stop_source& stop) {
+oneway_task pong(scheduler sch, auto r, auto w, stop_source& stop, int n) {
     try {
-        for(int n = 0;; n++) {
-            std::string s = co_await r.read();
-            std::cout << s << " " << n << "\n";
-            co_await sch.schedule(std::chrono::milliseconds(100));
-            co_await w.write("pong");
-        }
+        int s = co_await r.read();
+        std::cout << s << " ------ " << n << "\n";
+        co_await sch.schedule(std::chrono::milliseconds(5));
     } catch(operation_cancelled c) {
         std::cout << "pong cancelled\n";
     } catch(channel_closed c) {
-        std::cout << "channel closed\n";
+        std::cout << "channel closed - shutting down\n";
         stop.request_stop();  // ask the context to stop itself
     }
 }
@@ -74,9 +71,16 @@ int main() {
     stop_source stop;
     io_uring_context ctx;
     std::thread t([&ctx, &stop] { ctx.run(stop.get_token()); });
-    auto [r1, w1] = make_channel<std::string>(ctx);
-    auto [r2, w2] = make_channel<std::string>(ctx);
-    ping(ctx.scheduler(), std::move(r1), std::move(w2));
-    pong(ctx.scheduler(), std::move(r2), std::move(w1), stop);
+
+    auto c1 = make_channel<int>(ctx.scheduler());
+    auto c2 = make_channel<int>(ctx.scheduler());
+
+
+    for(int i = 0; i <= 9; i++) {
+        ping(ctx.scheduler(), c1.read(), c2.write(), i);
+    }
+    for(int i = 0; i <= 10; i++) {
+        pong(ctx.scheduler(), c2.read(), c1.write(), stop, i);
+    }
     t.join();
 }

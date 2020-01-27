@@ -6,3 +6,5 @@
 #include <corio/as_receiver.hpp>
 #include <corio/stop_token.hpp>
 #include <corio/io_uring.hpp>
+#include <corio/channel.hpp>
+#include <corio/then.hpp>

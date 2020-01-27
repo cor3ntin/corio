@@ -44,7 +44,7 @@ private:
         }
         template <typename Error>
         void set_error(Error&& error) {
-            if constexpr(std::is_same<Error, std::exception_ptr>::value) {
+            if constexpr(std::is_same_v<Error, std::exception_ptr>) {
                 this_->m_data.template emplace<2>(std::move(error));
             } else {
                 this_->m_data.template emplace<2>(std::make_exception_ptr(std::move(error)));
