@@ -4,12 +4,12 @@
 namespace cor3ntin::corio {
 
 template <typename Predecessor, typename Func>
-struct transform_sender {
+struct then_sender {
     [[no_unique_address]] Predecessor pred_;
     [[no_unique_address]] Func func_;
 
     template <template <typename...> class Tuple>
-    struct transform_result {
+    struct then_result {
     private:
         template <typename Result, typename = void>
         struct impl {
@@ -39,15 +39,15 @@ struct transform_sender {
     };
 
     template <template <typename...> class Variant, template <typename...> class Tuple>
-    using value_types = details::deduplicate_t<typename Predecessor::template value_types<
-        Variant, transform_result<Tuple>::template apply>>;
+    using value_types = details::deduplicate_t<
+        typename Predecessor::template value_types<Variant, then_result<Tuple>::template apply>>;
 
     template <template <typename...> class Variant>
     using error_types =
         typename Predecessor::template error_types<calculate_errors<Variant>::template apply>;
 
     template <typename Receiver>
-    struct transform_receiver {
+    struct then_receiver {
         [[no_unique_address]] Func func_;
         [[no_unique_address]] Receiver receiver_;
 
@@ -94,15 +94,15 @@ struct transform_sender {
     template <typename Receiver>
     auto connect(Receiver&& receiver) && {
         return execution::connect(std::forward<Predecessor>(pred_),
-                                  transform_receiver<std::remove_cvref_t<Receiver>>{
+                                  then_receiver<std::remove_cvref_t<Receiver>>{
                                       std::forward<Func>(func_), std::forward<Receiver>(receiver)});
     }
 };
 
 template <typename Sender, typename Func>
-auto transform(Sender&& predecessor, Func&& func) {
-    return transform_sender<std::remove_cvref_t<Sender>, std::decay_t<Func>>{
-        (Sender &&) predecessor, (Func &&) func};
+auto then(Sender&& predecessor, Func&& func) {
+    return then_sender<std::remove_cvref_t<Sender>, std::decay_t<Func>>{(Sender &&) predecessor,
+                                                                        (Func &&) func};
 }
 
 }  // namespace cor3ntin::corio

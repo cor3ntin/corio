@@ -5,7 +5,7 @@ project(corio)
 file(GLOB_RECURSE FILES
     ${PROJECT_SOURCE_DIR}/src/*.cpp
     ${PROJECT_SOURCE_DIR}/src/*.hpp
-    ${PROJECT_SOURCE_DIR}/include/*.hpp
+    ${PROJECT_SOURCE_DIR}/include/**.hpp
 )
 
 add_executable(corio ${FILES})
