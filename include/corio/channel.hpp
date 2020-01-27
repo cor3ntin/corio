@@ -75,7 +75,7 @@ namespace details {
         int m_fd;
     };
 
-    template <typename scheduler, typename T>
+    template <typename scheduler, typename T, bool Buffered>
     class channel {
     public:
         class read_receiver {
@@ -162,7 +162,7 @@ namespace details {
                 void start() {
                     auto* c = m_sender.m_channel;
                     std::unique_lock lock(c->m_mutex);
-                    if(c->m_queue.empty()) {
+                    if(c->is_empty()) {
                         if(c->m_capacity == 0) {
                             execution::set_error(m_receiver, channel_closed{});
                             return;
@@ -170,12 +170,19 @@ namespace details {
                         c->add_reader(this);
                         return;
                     }
-                    auto value = std::move(c->m_queue.front());
-                    c->m_queue.pop();
-                    if(c->m_capacity != 0) {
-                        c->m_write_event.notify();
+                    if constexpr(Buffered) {
+                        auto value = std::move(c->m_queue.front());
+                        c->m_queue.pop();
+
+                        if(c->m_capacity != 0) {
+                            c->m_write_event.notify();
+                        }
+                        handle_value(std::move(value));
+                    } else {
+                        auto writer = c->m_pending_writers.pop();
+                        handle_value(std::move(writer->value()));
+                        writer->handle_value();
                     }
-                    handle_value(std::move(value));
                 }
 
             protected:
@@ -257,19 +264,27 @@ namespace details {
                 operation(sender s, R&& r) : m_sender(std::move(s)), m_receiver(std::move(r)) {}
                 void start() {
                     auto* c = m_sender.m_channel;
-                    std::unique_lock lock(c->m_mutex);
                     if(c->m_capacity == 0) {
-                        lock.unlock();
                         execution::set_error(m_receiver, channel_closed{});
                         return;
                     }
-                    if(c->m_queue.size() >= c->m_capacity) {
+                    if(!c->can_write()) {
                         c->add_writer(this);
                         return;
                     }
-                    c->m_queue.push(std::move(m_sender.m_value));
+                    if constexpr(Buffered) {
+                        std::unique_lock lock(c->m_mutex);
+                        c->m_queue.push();
+                    } else {
+                        auto reader = c->m_pending_readers.pop();
+                        if(!reader) {
+                            c->add_writer(this);
+                            return;
+                        }
+                        reader->handle_value(std::move(m_sender.m_value));
+                    }
+
                     c->m_read_event.notify();
-                    lock.unlock();
                     handle_value();
                 }
 
@@ -340,6 +355,24 @@ namespace details {
                 m_write_event.close();
             }
         }
+        bool is_empty() {
+            if constexpr(Buffered) {
+                std::unique_lock lock(m_mutex);
+                return m_queue.empty();
+            } else {
+                return !m_pending_writers.front();
+            }
+        }
+
+        bool can_write() {
+            if constexpr(Buffered) {
+                return m_capacity != 0 && m_queue.size() <= m_capacity;
+            } else {
+                // always return true here, check the value of
+                // m_pending_readers.pop()
+                return true;
+            }
+        }
 
         event_notification<scheduler> m_read_event, m_write_event;
         iouring::read::operation<read_receiver> m_read_op;
@@ -347,13 +380,13 @@ namespace details {
         std::mutex m_mutex;
         linked_list<read_operation_base> m_pending_readers;
         linked_list<write_operation_base> m_pending_writers;
-        std::queue<T> m_queue;
+        [[no_unique_address]] std::conditional_t<Buffered, std::queue<T>, empty_result_t> m_queue;
         std::atomic<std::size_t> m_readers = 0;
         std::atomic<std::size_t> m_writers = 0;
-        std::atomic<std::size_t> m_capacity = std::numeric_limits<std::size_t>::max();
+        std::atomic<std::size_t> m_capacity;
 
     public:
-        channel(scheduler sch)
+        channel(scheduler sch, std::size_t capacity = std::numeric_limits<std::size_t>::max())
             : m_read_event(sch)
             , m_write_event(sch)
             , m_read_op([this] {
@@ -365,7 +398,8 @@ namespace details {
                 write_receiver r{};
                 r.ch = this;
                 return m_write_event.wait().connect(std::move(r));
-            }()) {
+            }())
+            , m_capacity(capacity) {
             execution::start(m_read_op);
             execution::start(m_write_op);
         }
@@ -380,13 +414,18 @@ namespace details {
         void on_read_event() {
             std::unique_lock lock(m_mutex);
             bool notify = false;
-            while(!m_queue.empty()) {
-                auto node = m_pending_readers.pop();
-                node->handle_value(std::move(m_queue.front()));
-                m_queue.pop();
-                notify = true;
+            if constexpr(Buffered) {
+                while(!m_queue.empty()) {
+                    auto node = m_pending_readers.pop();
+                    node->handle_value(std::move(m_queue.front()));
+                    m_queue.pop();
+                    notify = true;
+                }
+            } else {
+                handle_unbuffered_rw();
             }
-            if(m_queue.empty() && (m_capacity == 0 || m_writers == 0)) {
+
+            if(is_empty() && (m_capacity == 0 || m_writers == 0)) {
                 this->on_read_event_error(std::make_error_code(std::errc::bad_file_descriptor));
                 return;
             }
@@ -403,18 +442,38 @@ namespace details {
             }
             bool notify = false;
             {
-                std::unique_lock lock(m_mutex);
-                auto node = m_pending_writers.pop();
-                while(node) {
-                    m_queue.push(std::move(node->value()));
-                    node->handle_value();
-                    node = m_pending_writers.pop();
-                    notify = true;
+                if constexpr(Buffered) {
+                    std::unique_lock lock(m_mutex);
+                    auto node = m_pending_writers.pop();
+                    while(node) {
+                        m_queue.push(std::move(node->value()));
+                        node->handle_value();
+                        node = m_pending_writers.pop();
+                        notify = true;
+                    }
+                } else {
+                    handle_unbuffered_rw();
                 }
             }
             if(notify)
                 m_read_event.notify();
             execution::start(m_write_op);
+        }
+
+        void handle_unbuffered_rw() requires(!Buffered) {
+            while(true) {
+                auto reader = m_pending_readers.pop();
+                if(!reader) {
+                    break;
+                }
+                auto writer = m_pending_writers.pop();
+                if(!writer) {
+                    m_pending_readers.push(reader);
+                    break;
+                }
+                reader->handle_value(std::move(writer->value()));
+                writer->handle_value();
+            }
         }
 
         void on_read_event_error(std::error_code err) {
@@ -447,15 +506,25 @@ namespace details {
             std::shared_ptr<channel> ptr;
         };
 
-        template <typename T_, typename scheduler_>
-        friend typename channel<scheduler_, T_>::channels make_channel(scheduler_ context);
+        template <typename T_, typename scheduler_, bool Buffered_>
+        friend typename channel<scheduler_, T_, Buffered_>::channels
+        make_channel(scheduler_ context);
     };  // namespace details
 }  // namespace details
 
 template <typename T, typename scheduler>
-typename details::channel<scheduler, T>::channels make_channel(scheduler context) {
-    auto c = std::shared_ptr<details::channel<scheduler, T>>(
-        new details::channel<scheduler, T>(context));
+typename details::channel<scheduler, T, false>::channels make_channel(scheduler context) {
+    auto c = std::shared_ptr<details::channel<scheduler, T, false>>(
+        new details::channel<scheduler, T, false>(context));
     return {c};
 }
+
+template <typename T, typename scheduler>
+typename details::channel<scheduler, T, true>::channels make_channel(scheduler context,
+                                                                     std::size_t buffer_size) {
+    auto c = std::shared_ptr<details::channel<scheduler, T, true>>(
+        new details::channel<scheduler, T, true>(context, buffer_size));
+    return {c};
+}
+
 }  // namespace cor3ntin::corio
