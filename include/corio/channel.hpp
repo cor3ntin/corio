@@ -161,8 +161,18 @@ namespace details {
                 operation(sender s, R&& r) : m_sender(std::move(s)), m_receiver(std::move(r)) {}
                 void start() {
                     auto* c = m_sender.m_channel;
+                    auto writer = c->m_pending_writers.pop();
+                    if(writer) {
+                        handle_value(std::move(writer->value()));
+                        writer->handle_value();
+                        return;
+                    }
                     std::unique_lock lock(c->m_mutex);
-                    if(c->is_empty()) {
+                    bool empty = true;
+                    if constexpr(Buffered) {
+                        empty = c->m_queue.empty();
+                    }
+                    if(empty) {
                         if(c->m_capacity == 0) {
                             execution::set_error(m_receiver, channel_closed{});
                             return;
@@ -178,10 +188,6 @@ namespace details {
                             c->m_write_event.notify();
                         }
                         handle_value(std::move(value));
-                    } else {
-                        auto writer = c->m_pending_writers.pop();
-                        handle_value(std::move(writer->value()));
-                        writer->handle_value();
                     }
                 }
 
@@ -268,25 +274,25 @@ namespace details {
                         execution::set_error(m_receiver, channel_closed{});
                         return;
                     }
-                    if(!c->can_write()) {
-                        c->add_writer(this);
+                    auto reader = c->m_pending_readers.pop();
+                    if(reader) {
+                        reader->handle_value(std::move(m_sender.m_value));
+                        c->m_read_event.notify();
+                        handle_value();
                         return;
                     }
                     if constexpr(Buffered) {
                         std::unique_lock lock(c->m_mutex);
-                        c->m_queue.push();
-                    } else {
-                        auto reader = c->m_pending_readers.pop();
-                        if(!reader) {
-                            c->add_writer(this);
+                        if(c->m_queue.size() < c->m_capacity) {
+                            c->m_queue.push(std::move(m_sender.m_value));
+                            c->m_read_event.notify();
+                            handle_value();
                             return;
                         }
-                        reader->handle_value(std::move(m_sender.m_value));
                     }
-
-                    c->m_read_event.notify();
-                    handle_value();
+                    c->add_writer(this);
                 }
+
 
             protected:
                 void handle_error(std::error_code err) override {
@@ -355,24 +361,6 @@ namespace details {
                 m_write_event.close();
             }
         }
-        bool is_empty() {
-            if constexpr(Buffered) {
-                std::unique_lock lock(m_mutex);
-                return m_queue.empty();
-            } else {
-                return !m_pending_writers.front();
-            }
-        }
-
-        bool can_write() {
-            if constexpr(Buffered) {
-                return m_capacity != 0 && m_queue.size() <= m_capacity;
-            } else {
-                // always return true here, check the value of
-                // m_pending_readers.pop()
-                return true;
-            }
-        }
 
         event_notification<scheduler> m_read_event, m_write_event;
         iouring::read::operation<read_receiver> m_read_op;
@@ -412,20 +400,22 @@ namespace details {
         }
 
         void on_read_event() {
+            bool notify = handle_unbuffered_rw();
             std::unique_lock lock(m_mutex);
-            bool notify = false;
+            bool empty = false;
             if constexpr(Buffered) {
                 while(!m_queue.empty()) {
                     auto node = m_pending_readers.pop();
+                    if(!node)
+                        break;
                     node->handle_value(std::move(m_queue.front()));
                     m_queue.pop();
                     notify = true;
                 }
-            } else {
-                handle_unbuffered_rw();
+                empty = m_queue.empty();
             }
-
-            if(is_empty() && (m_capacity == 0 || m_writers == 0)) {
+            empty = empty && !m_pending_writers.front();
+            if(empty && (m_capacity == 0 || m_writers == 0)) {
                 this->on_read_event_error(std::make_error_code(std::errc::bad_file_descriptor));
                 return;
             }
@@ -440,19 +430,15 @@ namespace details {
                 this->on_write_event_error(std::make_error_code(std::errc::bad_file_descriptor));
                 return;
             }
-            bool notify = false;
-            {
-                if constexpr(Buffered) {
-                    std::unique_lock lock(m_mutex);
-                    auto node = m_pending_writers.pop();
-                    while(node) {
-                        m_queue.push(std::move(node->value()));
-                        node->handle_value();
-                        node = m_pending_writers.pop();
-                        notify = true;
-                    }
-                } else {
-                    handle_unbuffered_rw();
+            bool notify = handle_unbuffered_rw();
+            if constexpr(Buffered) {
+                std::unique_lock lock(m_mutex);
+                auto node = m_pending_writers.pop();
+                while(node) {
+                    m_queue.push(std::move(node->value()));
+                    node->handle_value();
+                    node = m_pending_writers.pop();
+                    notify = true;
                 }
             }
             if(notify)
@@ -460,7 +446,8 @@ namespace details {
             execution::start(m_write_op);
         }
 
-        void handle_unbuffered_rw() requires(!Buffered) {
+        bool handle_unbuffered_rw() {
+            bool notify = false;
             while(true) {
                 auto reader = m_pending_readers.pop();
                 if(!reader) {
@@ -473,7 +460,9 @@ namespace details {
                 }
                 reader->handle_value(std::move(writer->value()));
                 writer->handle_value();
+                notify = true;
             }
+            return notify;
         }
 
         void on_read_event_error(std::error_code err) {

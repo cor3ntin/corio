@@ -73,7 +73,7 @@ int main() {
     std::thread t([&ctx, &stop] { ctx.run(stop.get_token()); });
 
     auto c1 = make_channel<int>(ctx.scheduler());
-    auto c2 = make_channel<int>(ctx.scheduler());
+    auto c2 = make_channel<int>(ctx.scheduler(), 10);
 
 
     for(int i = 0; i <= 9; i++) {
