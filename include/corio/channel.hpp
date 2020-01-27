@@ -3,7 +3,6 @@
 #include <queue>
 #include <optional>
 #include <corio/then.hpp>
-#include <corio/io_uring.hpp>
 
 namespace cor3ntin::corio {
 
@@ -50,29 +49,6 @@ namespace details {
         std::mutex m_mutex;
         T* head = nullptr;
         T* tail = nullptr;
-    };
-
-
-    template <typename scheduler>
-    class event_notification {
-    public:
-        event_notification(scheduler sch) : m_scheduler(sch) {
-            m_fd = eventfd(1, 0);
-        }
-        void notify() {
-            eventfd_write(m_fd, 1);
-        }
-        void close() {
-            ::close(m_fd);
-        }
-        auto wait() {
-            return async_read(m_scheduler, m_fd, &m_event, sizeof(eventfd_t));
-        }
-
-    private:
-        eventfd_t m_event;
-        scheduler m_scheduler;
-        int m_fd;
     };
 
     template <typename scheduler, typename T, bool Buffered>
