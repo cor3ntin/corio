@@ -41,7 +41,8 @@ using namespace cor3ntin::corio;
 template <execution::scheduler scheduler>
 oneway_task ping(scheduler sch, auto r, auto w, int i) {
     try {
-        co_await sch.schedule(std::chrono::milliseconds(1000));
+        co_await sch.schedule();
+        co_await sch.schedule(std::chrono::milliseconds(1000 * i));
         co_await w.write(i);
         std::cout << "Wrote Ping -->" << i << "\n";
 
@@ -56,9 +57,11 @@ oneway_task ping(scheduler sch, auto r, auto w, int i) {
 template <execution::scheduler scheduler>
 oneway_task pong(scheduler sch, auto r, auto w, stop_source& stop, int n) {
     try {
+        co_await sch.schedule();
+        co_await sch.schedule(std::chrono::milliseconds(300));
         int s = co_await r.read();
         std::cout << s << " ------ " << n << "\n";
-        co_await sch.schedule(std::chrono::milliseconds(5));
+
     } catch(operation_cancelled c) {
         std::cout << "pong cancelled\n";
     } catch(channel_closed c) {

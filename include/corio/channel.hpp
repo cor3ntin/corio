@@ -78,37 +78,6 @@ namespace details {
     template <typename scheduler, typename T, bool Buffered>
     class channel {
     public:
-        class read_receiver {
-        public:
-            read_receiver() = default;
-            read_receiver(read_receiver&& other) noexcept = default;
-            void set_value(std::size_t s) {
-                ch->on_read_event();
-            }
-            void set_error(std::error_code err) {
-
-                ch->on_read_event_error(err);
-            }
-            void set_done() {
-                // cannot happen
-            }
-            channel* ch;
-        };
-        class write_receiver {
-        public:
-            write_receiver() = default;
-            write_receiver(write_receiver&& other) noexcept = default;
-            void set_value(std::size_t s) {
-                ch->on_write_event();
-            }
-            void set_error(std::error_code err) {
-                ch->on_write_event_error(err);
-            }
-            void set_done() {
-                // cannot happen
-            }
-            channel* ch;
-        };
         class read_operation_base : public linked_list_node {
             friend channel;
 
@@ -167,11 +136,12 @@ namespace details {
                         writer->handle_value();
                         return;
                     }
-                    std::unique_lock lock(c->m_mutex);
                     bool empty = true;
                     if constexpr(Buffered) {
+                        std::unique_lock lock(c->m_mutex);
                         empty = c->m_queue.empty();
                     }
+
                     if(empty) {
                         if(c->m_capacity == 0) {
                             execution::set_error(m_receiver, channel_closed{});
@@ -181,11 +151,13 @@ namespace details {
                         return;
                     }
                     if constexpr(Buffered) {
+
+                        std::unique_lock lock(c->m_mutex);
                         auto value = std::move(c->m_queue.front());
                         c->m_queue.pop();
-
+                        lock.unlock();
                         if(c->m_capacity != 0) {
-                            c->on_write_event();
+                            c->do_write();
                         }
                         handle_value(std::move(value));
                     }
@@ -289,6 +261,7 @@ namespace details {
                         }
                     }
                     c->add_writer(this);
+                    c->do_write();
                 }
 
 
@@ -353,10 +326,10 @@ namespace details {
         void close() {
             if(m_capacity != 0) {
                 m_capacity = 0;
-                on_read_event();
-                on_write_event();
+                do_rw();
             }
         }
+        scheduler m_scheduler;
         std::mutex m_mutex;
         linked_list<read_operation_base> m_pending_readers;
         linked_list<write_operation_base> m_pending_writers;
@@ -367,7 +340,7 @@ namespace details {
 
     public:
         channel(scheduler sch, std::size_t capacity = std::numeric_limits<std::size_t>::max())
-            : m_capacity(capacity) {}
+            : m_scheduler(std::move(sch)), m_capacity(capacity) {}
 
         void add_reader(read_operation_base* op) {
             m_pending_readers.push(op);
@@ -376,7 +349,12 @@ namespace details {
             m_pending_writers.push(op);
         }
 
-        void on_read_event() {
+        void do_rw() {
+            do_read();
+            do_write();
+        }
+
+        void do_read() {
             bool notify = handle_unbuffered_rw();
             std::unique_lock lock(m_mutex);
             bool empty = false;
@@ -396,10 +374,9 @@ namespace details {
                 this->on_read_event_error(std::make_error_code(std::errc::bad_file_descriptor));
                 return;
             }
-            on_write_event();
         }
 
-        void on_write_event() {
+        void do_write() {
             if(m_capacity == 0) {
                 this->on_write_event_error(std::make_error_code(std::errc::bad_file_descriptor));
                 return;
@@ -415,7 +392,8 @@ namespace details {
                     notify = true;
                 }
             }
-            on_read_event();
+            if(notify)
+                do_read();
         }
 
         bool handle_unbuffered_rw() {
