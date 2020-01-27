@@ -185,7 +185,7 @@ namespace details {
                         c->m_queue.pop();
 
                         if(c->m_capacity != 0) {
-                            c->m_write_event.notify();
+                            c->on_write_event();
                         }
                         handle_value(std::move(value));
                     }
@@ -277,7 +277,6 @@ namespace details {
                     auto reader = c->m_pending_readers.pop();
                     if(reader) {
                         reader->handle_value(std::move(m_sender.m_value));
-                        c->m_read_event.notify();
                         handle_value();
                         return;
                     }
@@ -285,7 +284,6 @@ namespace details {
                         std::unique_lock lock(c->m_mutex);
                         if(c->m_queue.size() < c->m_capacity) {
                             c->m_queue.push(std::move(m_sender.m_value));
-                            c->m_read_event.notify();
                             handle_value();
                             return;
                         }
@@ -355,16 +353,10 @@ namespace details {
         void close() {
             if(m_capacity != 0) {
                 m_capacity = 0;
-                m_read_op.start();
-                m_write_op.start();
-                m_read_event.close();
-                m_write_event.close();
+                on_read_event();
+                on_write_event();
             }
         }
-
-        event_notification<scheduler> m_read_event, m_write_event;
-        iouring::read::operation<read_receiver> m_read_op;
-        iouring::read::operation<write_receiver> m_write_op;
         std::mutex m_mutex;
         linked_list<read_operation_base> m_pending_readers;
         linked_list<write_operation_base> m_pending_writers;
@@ -375,22 +367,7 @@ namespace details {
 
     public:
         channel(scheduler sch, std::size_t capacity = std::numeric_limits<std::size_t>::max())
-            : m_read_event(sch)
-            , m_write_event(sch)
-            , m_read_op([this] {
-                read_receiver r{};
-                r.ch = this;
-                return m_read_event.wait().connect(std::move(r));
-            }())
-            , m_write_op([this] {
-                write_receiver r{};
-                r.ch = this;
-                return m_write_event.wait().connect(std::move(r));
-            }())
-            , m_capacity(capacity) {
-            execution::start(m_read_op);
-            execution::start(m_write_op);
-        }
+            : m_capacity(capacity) {}
 
         void add_reader(read_operation_base* op) {
             m_pending_readers.push(op);
@@ -419,10 +396,7 @@ namespace details {
                 this->on_read_event_error(std::make_error_code(std::errc::bad_file_descriptor));
                 return;
             }
-            if(notify)
-                m_write_event.notify();
-            if(m_readers > 0)
-                execution::start(m_read_op);
+            on_write_event();
         }
 
         void on_write_event() {
@@ -441,9 +415,7 @@ namespace details {
                     notify = true;
                 }
             }
-            if(notify)
-                m_read_event.notify();
-            execution::start(m_write_op);
+            on_read_event();
         }
 
         bool handle_unbuffered_rw() {
